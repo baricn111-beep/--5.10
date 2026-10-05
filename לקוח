@@ -1,0 +1,299 @@
+
+import hashlib
+import logging
+import os
+import socket
+import threading
+import time
+
+
+# ---------------- SETTINGS - edit these ----------------
+TARGET_MD5 = "EC9C0F7EDCC18A98B1F31853B1813301"
+DIGITS = 10
+HOST = "127.0.0.1"
+PORT = 5050
+# ---------------------------------------------------------
+
+
+def compute_md5(text):
+    return hashlib.md5(text.encode()).hexdigest()
+
+
+class WorkerClient:
+    def __init__(self, target_md5, digit_length, host, port):
+        self.target_md5 = target_md5.lower()
+        self.digit_length = digit_length
+        self.host = host
+        self.port = port
+
+
+        self.num_threads = os.cpu_count() or 1
+
+
+        self.stop = False
+        self.found_value = None
+
+
+        self.connection = None
+        self.socket_lock = threading.Lock()
+
+
+    def connect_to_server(self):
+        self.connection = socket.socket(
+            socket.AF_INET,
+            socket.SOCK_STREAM
+        )
+
+
+        self.connection.connect((self.host, self.port))
+
+
+        logging.info(
+            "Connected to server %s:%s",
+            self.host,
+            self.port
+        )
+
+
+    def receive_message(self):
+        data = b""
+
+
+        while b"\n" not in data:
+            part = self.connection.recv(1024)
+
+
+            if not part:
+                break
+
+
+            data += part
+
+
+        return data.decode().strip()
+
+
+    def send_message(self, message):
+        with self.socket_lock:
+            self.connection.sendall((message + "\n").encode())
+
+
+            return self.receive_message()
+
+
+    def ask_for_work(self):
+        reply = self.send_message(
+            "GET " + str(self.num_threads)
+        )
+
+
+        if reply == "STOP":
+            return None
+
+
+        parts = reply.split()
+
+
+        start = int(parts[1])
+        end = int(parts[2])
+
+
+        return start, end
+
+
+    def tell_server_found(self, value):
+        self.send_message("FOUND " + value)
+
+
+    def background_stop_checker(self):
+        while not self.stop:
+            time.sleep(1)
+
+
+            if self.stop:
+                break
+
+
+            try:
+                reply = self.send_message("CHECK")
+
+
+                if reply == "STOP":
+                    logging.info(
+                        "Server told this client to stop."
+                    )
+
+
+                    self.stop = True
+
+
+            except Exception as error:
+                logging.error(
+                    "Error while checking server status: %s",
+                    error
+                )
+
+
+                self.stop = True
+
+
+    def search_range(self, start, end):
+        logging.info(
+            "Thread searching range %s - %s",
+            start,
+            end
+        )
+
+
+        for number in range(start, end):
+            if self.stop:
+                return
+
+
+            candidate = str(number).zfill(self.digit_length)
+
+
+            if compute_md5(candidate) == self.target_md5:
+                self.found_value = candidate
+                self.stop = True
+                return
+
+
+    def split_into_chunks(self, start, end):
+        span = end - start
+        step = (span // self.num_threads) + 1
+
+
+        chunks = []
+        current = start
+
+
+        while current < end:
+            chunk_end = min(
+                current + step,
+                end
+            )
+
+
+            chunks.append((current, chunk_end))
+
+
+            current = chunk_end
+
+
+        return chunks
+
+
+    def run(self):
+        logging.info(
+            "This machine has %s CPU core(s)",
+            self.num_threads
+        )
+
+
+        self.connect_to_server()
+
+
+        checker_thread = threading.Thread(
+            target=self.background_stop_checker
+        )
+
+
+        checker_thread.daemon = True
+        checker_thread.start()
+
+
+        while not self.stop:
+            work = self.ask_for_work()
+
+
+            if work is None:
+                logging.info("No more work left.")
+                break
+
+
+            start, end = work
+
+
+            logging.info(
+                "Received range %s - %s",
+                start,
+                end
+            )
+
+
+            threads = []
+
+
+            for chunk_start, chunk_end in self.split_into_chunks(
+                start,
+                end
+            ):
+                thread = threading.Thread(
+                    target=self.search_range,
+                    args=(chunk_start, chunk_end)
+                )
+
+
+                threads.append(thread)
+                thread.start()
+
+
+            for thread in threads:
+                thread.join()
+
+
+            if self.found_value is not None:
+                logging.info(
+                    "Found the answer: %s",
+                    self.found_value
+                )
+
+
+                self.tell_server_found(
+                    self.found_value
+                )
+
+
+                self.stop = True
+
+
+        if self.found_value is None and self.stop:
+            logging.info(
+                "Someone else already found the answer."
+            )
+
+
+        self.connection.close()
+
+
+def main():
+    client = WorkerClient(
+        TARGET_MD5,
+        DIGITS,
+        HOST,
+        PORT
+    )
+
+
+    client.run()
+
+
+
+
+if __name__ == "__main__":
+    # ---------------- LOGGING SETTINGS ----------------
+    LOG_LEVEL = logging.INFO
+    LOG_FILE = "client.log"
+
+
+    logging.basicConfig(
+        level=LOG_LEVEL,
+        filename=LOG_FILE,
+        format="%(asctime)s [%(levelname)s] %(message)s"
+    )
+    # ---------------------------------------------------
+
+
+    main()
+
