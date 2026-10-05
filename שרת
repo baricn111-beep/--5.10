@@ -1,0 +1,272 @@
+
+import hashlib
+import logging
+import socket
+import threading
+import time
+
+
+# ---------------- SETTINGS - edit these ----------------
+TARGET_MD5 = "EC9C0F7EDCC18A98B1F31853B1813301"
+DIGITS = 10
+HOST = "0.0.0.0"
+PORT = 5050
+
+
+CHUNK_SIZE = 100000
+# ---------------------------------------------------------
+
+
+class WorkServer:
+    def __init__(self, target_md5, digit_length, host, port):
+        self.target_md5 = target_md5.lower()
+        self.digit_length = digit_length
+        self.search_space_size = 10 ** digit_length
+        self.host = host
+        self.port = port
+
+
+        self.next_index = 0
+        self.lock = threading.Lock()
+
+
+        self.found = False
+        self.found_value = None
+
+
+    def get_next_range(self, capacity):
+        block_size = capacity * CHUNK_SIZE
+
+
+        self.lock.acquire()
+
+
+        start = self.next_index
+        end = min(start + block_size, self.search_space_size)
+        self.next_index = end
+
+
+        self.lock.release()
+
+
+        if start >= self.search_space_size:
+            return None
+
+
+        return start, end
+
+
+    def handle_message(self, message):
+        parts = message.split()
+        command = parts[0]
+
+
+        if command == "GET":
+            if self.found:
+                return "STOP"
+
+
+            capacity = int(parts[1])
+            work = self.get_next_range(capacity)
+
+
+            if work is None:
+                return "STOP"
+
+
+            start, end = work
+
+
+            logging.info(
+                "Giving range %s - %s to client",
+                start,
+                end
+            )
+
+
+            return "RANGE " + str(start) + " " + str(end)
+
+
+        if command == "CHECK":
+            if self.found:
+                return "STOP"
+
+
+            return "GO"
+
+
+        if command == "FOUND":
+            candidate = parts[1]
+
+
+            if hashlib.md5(candidate.encode()).hexdigest() == self.target_md5:
+                self.found = True
+                self.found_value = candidate
+
+
+                logging.info("Solution found: %s", candidate)
+
+
+            else:
+                logging.warning(
+                    "Client sent an incorrect solution: %s",
+                    candidate
+                )
+
+
+            return "OK"
+
+
+        logging.error("Unknown command received: %s", command)
+        return "UNKNOWN"
+
+
+    def receive_message(self, connection):
+        data = b""
+
+
+        while b"\n" not in data:
+            part = connection.recv(1024)
+
+
+            if not part:
+                break
+
+
+            data += part
+
+
+        return data.decode().strip()
+
+
+    def handle_client(self, connection):
+        try:
+            while not self.found:
+                message = self.receive_message(connection)
+
+
+                if not message:
+                    break
+
+
+                reply = self.handle_message(message)
+                connection.sendall((reply + "\n").encode())
+
+
+                if reply == "STOP":
+                    break
+
+
+        except Exception as error:
+            logging.error("Error while handling client: %s", error)
+
+
+        finally:
+            connection.close()
+
+
+    def run(self):
+        server_socket = socket.socket(
+            socket.AF_INET,
+            socket.SOCK_STREAM
+        )
+
+
+        server_socket.setsockopt(
+            socket.SOL_SOCKET,
+            socket.SO_REUSEADDR,
+            1
+        )
+
+
+        server_socket.bind((self.host, self.port))
+        server_socket.listen()
+
+
+        server_socket.settimeout(1.0)
+
+
+        logging.info(
+            "Server listening on %s:%s",
+            self.host,
+            self.port
+        )
+
+
+        logging.info("Target MD5: %s", self.target_md5)
+
+
+        logging.info(
+            "Search space: %s possibilities",
+            self.search_space_size
+        )
+
+
+        while not self.found:
+            try:
+                connection, address = server_socket.accept()
+
+
+                logging.info(
+                    "Client connected: %s",
+                    address
+                )
+
+
+                thread = threading.Thread(
+                    target=self.handle_client,
+                    args=(connection,)
+                )
+
+
+                thread.start()
+
+
+            except socket.timeout:
+                continue
+
+
+        logging.info("Done! The answer is: %s", self.found_value)
+
+
+        logging.info(
+            "Waiting a few seconds before shutting down..."
+        )
+
+
+        time.sleep(3)
+
+
+        server_socket.close()
+
+
+def main():
+    server = WorkServer(
+        TARGET_MD5,
+        DIGITS,
+        HOST,
+        PORT
+    )
+
+
+    server.run()
+
+
+
+
+if __name__ == "__main__":
+    # ---------------- LOGGING SETTINGS ----------------
+    LOG_LEVEL = logging.INFO
+    LOG_FILE = "server.log"
+
+
+    logging.basicConfig(
+        level=LOG_LEVEL,
+        filename=LOG_FILE,
+        format="%(asctime)s [%(levelname)s] %(message)s"
+    )
+    # ---------------------------------------------------
+
+
+    main()
+
